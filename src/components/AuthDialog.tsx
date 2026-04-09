@@ -30,7 +30,13 @@ export default function AuthDialog({ isOpen, onClose }: AuthDialogProps) {
         if (error) throw error;
         onClose(); // Close immediately on successful login
       } else {
-        const { error: signUpError } = await supabase.auth.signUp({ email, password });
+        const { error: signUpError } = await supabase.auth.signUp({ 
+          email, 
+          password,
+          options: {
+            emailRedirectTo: typeof window !== 'undefined' ? `${window.location.origin}/` : undefined
+          }
+        });
         if (signUpError) throw signUpError;
         setSuccessMsg('¡Cuenta creada! Ya puedes iniciar sesión.');
         setIsLogin(true); // switch to login mode implicitly
