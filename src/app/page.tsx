@@ -3,10 +3,9 @@
 import { useState, useEffect } from 'react';
 import SearchGames from '@/components/SearchGames';
 import AuthDialog from '@/components/AuthDialog';
-import { getGamePlaytime } from '@/app/actions';
 import { RawgGame } from '@/lib/rawg';
 import Image from 'next/image';
-import { Zap, Star, Compass, Clock, Loader2, Check, AlertCircle, Timer } from 'lucide-react';
+import { Zap, Star, Compass, Clock, Loader2, Check, AlertCircle, Timer, UploadCloud, ImageIcon } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Session } from '@supabase/supabase-js';
 
@@ -14,7 +13,11 @@ export default function Home() {
   const [selectedGame, setSelectedGame] = useState<RawgGame | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
-  const [isFetchingHours, setIsFetchingHours] = useState(false);
+  
+  // Data State
+  const [hoursPlayed, setHoursPlayed] = useState<number>(0);
+  const [hltbProof, setHltbProof] = useState<File | null>(null);
+  const [creditsProof, setCreditsProof] = useState<File | null>(null);
   
   // Auth state
   const [session, setSession] = useState<Session | null>(null);
@@ -34,8 +37,17 @@ export default function Home() {
       return;
     }
 
+    if (!hltbProof || !creditsProof) {
+      setErrorMessage("Debes adjuntar ambas pruebas fotográficas para poder validar la partida.");
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus('idle'), 3000);
+      return;
+    }
+
     setSaveStatus('saving');
+    setErrorMessage('');
     
+    // 1. Guardar la info básica del juego en caché
     await supabase.from('games').upsert({
       id: selectedGame.id,
       name: selectedGame.name,
@@ -45,23 +57,45 @@ export default function Home() {
       cover_url: selectedGame.background_image
     });
 
-    const calculatedHours = selectedGame.playtime || 0;
+    try {
+      // 2. Subir Archivos a Supabase Storage (Bucket 'proofs')
+      const hltbExt = hltbProof.name.split('.').pop();
+      const creditsExt = creditsProof.name.split('.').pop();
+      const hltbFileName = `${session.user.id}/${selectedGame.id}_hltb_${Date.now()}.${hltbExt}`;
+      const creditsFileName = `${session.user.id}/${selectedGame.id}_credits_${Date.now()}.${creditsExt}`;
 
-    const { error } = await supabase.from('plays').upsert({
-      profile_id: session.user.id,
-      user_email: session.user.email,
-      game_id: selectedGame.id,
-      hours_played: calculatedHours,
-      completed: true
-    }, { onConflict: 'profile_id, game_id' });
+      const { error: hError } = await supabase.storage.from('proofs').upload(hltbFileName, hltbProof);
+      if (hError) throw new Error("Error subiendo la captura de HLTB: " + hError.message);
 
-    if (error) {
-      console.error(error);
-      setErrorMessage(error.message);
-      setSaveStatus('error');
-    } else {
+      const { error: cError } = await supabase.storage.from('proofs').upload(creditsFileName, creditsProof);
+      if (cError) throw new Error("Error subiendo la captura de Créditos: " + cError.message);
+
+      // Obtener URLs públicas (incluso si falla el getPublicUrl no detiene el insert asumiendo el bucket público)
+      const hltbUrl = supabase.storage.from('proofs').getPublicUrl(hltbFileName).data.publicUrl;
+      const creditsUrl = supabase.storage.from('proofs').getPublicUrl(creditsFileName).data.publicUrl;
+
+      // 3. Upsert a la tabla de plays
+      const { error } = await supabase.from('plays').upsert({
+        profile_id: session.user.id,
+        user_email: session.user.email,
+        game_id: selectedGame.id,
+        hours_played: hoursPlayed,
+        hltb_proof_url: hltbUrl,
+        credits_proof_url: creditsUrl,
+        completed: true
+      }, { onConflict: 'profile_id, game_id' });
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
       setSaveStatus('success');
-      setTimeout(() => setSaveStatus('idle'), 3000);
+      setTimeout(() => setSaveStatus('idle'), 4000);
+      
+    } catch (err: any) {
+      console.error(err);
+      setErrorMessage(err.message || 'Error general guardando partida');
+      setSaveStatus('error');
     }
   };
 
@@ -74,23 +108,18 @@ export default function Home() {
           Liga del Backlog
         </h1>
         <p className="text-gray-400 text-center text-lg mb-12 max-w-lg">
-          Solo escribe el nombre del juego. El sistema deducirá su duración, género y métricas automáticamente.
+          Certifica tus victorias subiendo evidencia. Solo verdaderos completistas admitidos.
         </p>
 
         {/* ── Search ── */}
         <div className="w-full mb-12 relative z-40">
-          <SearchGames onSelect={async (game) => {
-             // Force zero initially to ignore RAWG time
-             setSelectedGame({ ...game, playtime: 0 });
+          <SearchGames onSelect={(game) => {
+             setSelectedGame(game);
              setSaveStatus('idle');
-             
-             // Fetch HLTB exclusively asynchronously directly from Server Action
-             setIsFetchingHours(true);
-             const hltbHours = await getGamePlaytime(game.name);
-             if (hltbHours) {
-                setSelectedGame(prev => prev ? { ...prev, playtime: hltbHours } : prev);
-             }
-             setIsFetchingHours(false);
+             setHltbProof(null);
+             setCreditsProof(null);
+             // Opción Híbrida: Rellenamos con data general de RAWG, pero el user puede modificar a placer
+             setHoursPlayed(game.playtime || 0);
           }} />
         </div>
 
@@ -121,15 +150,54 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Metric Cards 5-Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              <MetricCard
-                icon={<Timer className="w-5 h-5" />}
-                accentColor="border-purple-500 text-purple-400 bg-purple-500/10"
-                title="Viciador"
-                value={isFetchingHours ? <Loader2 className="w-6 h-6 animate-spin text-purple-400 my-1.5" /> : (selectedGame.playtime || 0)}
-                desc={isFetchingHours ? "Buscando en HLTB..." : (selectedGame.playtime ? "Historia Ppl. (HLTB)" : "Sin datos en HLTB :(")}
+            {/* Input Hours Card (Opción Híbrida) */}
+            <div className="bg-gray-800/80 rounded-2xl p-6 border border-gray-700 flex flex-col gap-5">
+              <div className="flex justify-between items-center">
+                <div>
+                  <h3 className="text-white font-bold text-lg flex items-center gap-2"><Timer className="w-5 h-5 text-purple-400"/> Horas Invertidas</h3>
+                  <p className="text-gray-400 text-sm">Corrobóralo con la web de HLTB</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input 
+                    type="number" 
+                    min="0"
+                    value={hoursPlayed}
+                    onChange={(e) => setHoursPlayed(Number(e.target.value) || 0)}
+                    className="bg-gray-900 border border-gray-600 rounded-lg text-white font-black text-2xl w-24 text-center py-2 focus:border-indigo-500 transition-colors outline-none"
+                  />
+                  <span className="text-gray-500 font-bold text-lg">hrs</span>
+                </div>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="500" 
+                value={hoursPlayed} 
+                onChange={(e) => setHoursPlayed(Number(e.target.value))}
+                className="w-full accent-purple-500 h-2 bg-gray-900 rounded-lg appearance-none cursor-pointer"
               />
+            </div>
+
+            {/* Evidence File Uploads */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FileUploadCard 
+                title="Prueba de HowLongToBeat" 
+                description="Captura mostrando las horas"
+                file={hltbProof}
+                onFileChange={setHltbProof}
+                accent="border-purple-500/50 text-purple-400"
+              />
+              <FileUploadCard 
+                title="Créditos del Juego" 
+                description="Captura de fin de partida"
+                file={creditsProof}
+                onFileChange={setCreditsProof}
+                accent="border-blue-500/50 text-blue-400"
+              />
+            </div>
+
+            {/* Metric Cards 4-Grid */}
+            <div className="grid grid-cols-2 gap-4">
               <MetricCard
                 icon={<Zap className="w-5 h-5" />}
                 accentColor="border-indigo-500 text-indigo-400 bg-indigo-500/10"
@@ -149,7 +217,7 @@ export default function Home() {
                 accentColor="border-pink-500 text-pink-400 bg-pink-500/10"
                 title="Explorador"
                 value={selectedGame.genres.length * 10}
-                desc={`${selectedGame.genres.length} géneros detectados`}
+                desc={`${selectedGame.genres.length} géneros útiles`}
               />
               <MetricCard
                 icon={<Clock className="w-5 h-5" />}
@@ -172,10 +240,10 @@ export default function Home() {
                 ${saveStatus === 'error' ? 'bg-gray-800 border-red-500 text-red-400 shadow-none' : ''}
               `}
             >
-              {saveStatus === 'idle' && (!session ? 'Iniciar Sesión para Guardar' : 'Guardar en mi Backlog')}
-              {saveStatus === 'saving' && <><Loader2 className="w-5 h-5 animate-spin" /> Guardando...</>}
-              {saveStatus === 'success' && <><Check className="w-5 h-5" /> ¡Guardado en tu BD!</>}
-              {saveStatus === 'error' && <><AlertCircle className="w-5 h-5" /> Error: {errorMessage || 'Falla en BD'}</>}
+              {saveStatus === 'idle' && (!session ? 'Iniciar Sesión para Guardar' : 'Subir Pruebas y Registrar Victoria')}
+              {saveStatus === 'saving' && <><Loader2 className="w-5 h-5 animate-spin" /> Subiendo archivos y guardando...</>}
+              {saveStatus === 'success' && <><Check className="w-5 h-5" /> ¡Aprobado y Guardado!</>}
+              {saveStatus === 'error' && <><AlertCircle className="w-5 h-5" /> {errorMessage || 'Falla en BD'}</>}
             </button>
           </div>
         )}
@@ -188,7 +256,38 @@ export default function Home() {
   );
 }
 
-/* ── Metric Card Component ── */
+/* ── Auxiliary Components ── */
+
+function FileUploadCard({ title, description, file, onFileChange, accent }: any) {
+  return (
+    <label className={`relative flex flex-col items-center justify-center p-6 border-2 border-dashed rounded-2xl cursor-pointer hover:bg-gray-800/80 transition-colors ${file ? 'bg-gray-800/50 border-emerald-500/50' : 'bg-gray-900 border-gray-700'}`}>
+      <input 
+        type="file" 
+        accept="image/png, image/jpeg, image/webp" 
+        className="hidden" 
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            onFileChange(e.target.files[0]);
+          }
+        }} 
+      />
+      {!file ? (
+        <>
+          <UploadCloud className={`w-8 h-8 mb-2 ${accent}`} />
+          <p className="text-white font-bold text-sm text-center">{title}</p>
+          <p className="text-gray-500 text-xs mt-1 text-center">{description}</p>
+        </>
+      ) : (
+        <>
+          <ImageIcon className="w-8 h-8 mb-2 text-emerald-400" />
+          <p className="text-emerald-400 font-bold text-sm text-center line-clamp-1 max-w-full px-2" title={file.name}>{file.name}</p>
+          <p className="text-emerald-500/70 text-xs mt-1 text-center">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+        </>
+      )}
+    </label>
+  );
+}
+
 function MetricCard({ icon, accentColor, title, value, desc }: any) {
   const [borderClass, textClass, bgClass] = accentColor.split(' ');
 
