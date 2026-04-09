@@ -80,16 +80,15 @@ export default function Home() {
         {/* ── Search ── */}
         <div className="w-full mb-12 relative z-40">
           <SearchGames onSelect={async (game) => {
-             setSelectedGame(game);
+             // Force zero initially to ignore RAWG time
+             setSelectedGame({ ...game, playtime: 0 });
              setSaveStatus('idle');
              
-             // Fetch HLTB asynchronously directly from Server Action
+             // Fetch HLTB exclusively asynchronously directly from Server Action
              setIsFetchingHours(true);
-             if (!game.playtime || game.playtime === 0) {
-                 const hltbHours = await getGamePlaytime(game.name);
-                 if (hltbHours) {
-                    setSelectedGame(prev => prev ? { ...prev, playtime: hltbHours } : prev);
-                 }
+             const hltbHours = await getGamePlaytime(game.name);
+             if (hltbHours) {
+                setSelectedGame(prev => prev ? { ...prev, playtime: hltbHours } : prev);
              }
              setIsFetchingHours(false);
           }} />
@@ -129,7 +128,7 @@ export default function Home() {
                 accentColor="border-purple-500 text-purple-400 bg-purple-500/10"
                 title="Viciador"
                 value={isFetchingHours ? <Loader2 className="w-6 h-6 animate-spin text-purple-400 my-1.5" /> : (selectedGame.playtime || 0)}
-                desc={isFetchingHours ? "Buscando horas estimadas..." : (selectedGame.playtime ? "Horas promedio (HLTB/RAWG)" : "Sin datos de horas :(")}
+                desc={isFetchingHours ? "Buscando en HLTB..." : (selectedGame.playtime ? "Historia Ppl. (HLTB)" : "Sin datos en HLTB :(")}
               />
               <MetricCard
                 icon={<Zap className="w-5 h-5" />}
