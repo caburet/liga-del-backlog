@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { Trophy, Compass, Clock, Star, Zap, Timer } from 'lucide-react';
 
@@ -34,19 +35,36 @@ export default function Leaderboards() {
 
   useEffect(() => {
     async function loadData() {
+      // Fetch plays with mission data joined
       const { data: plays, error } = await supabase
         .from('plays')
         .select(`
           profile_id,
           user_email,
           hours_played,
-          games (year, rating, genres)
+          mission_id,
+          games (year, rating, genres),
+          missions (multiplier, type)
         `);
       
       if (error || !plays) {
         console.error("Error fetching leaderboards", error);
         setLoading(false);
         return;
+      }
+
+      // Fetch penalties to apply deductions
+      const { data: penaltiesData } = await supabase
+        .from('penalties')
+        .select('user_email, game_id, missions (multiplier)');
+      
+      // Map penalties by user: total penalty factor (multiplicative)
+      const penaltyByUser: Record<string, number> = {};
+      if (penaltiesData) {
+        penaltiesData.forEach((pen: any) => {
+          const factor = pen.missions?.multiplier ?? 1;
+          penaltyByUser[pen.user_email] = (penaltyByUser[pen.user_email] ?? 1) * factor;
+        });
       }
 
       const userMap: Record<string, PlayerScore> = {};
@@ -56,7 +74,7 @@ export default function Leaderboards() {
         if (!userMap[userId]) {
           userMap[userId] = {
             profile_id: userId,
-            email: p.user_email || `Gamer-${userId.substring(0, 4)}`,
+            email: (p as any).user_email || `Gamer-${userId.substring(0, 4)}`,
             viciadorPoints: 0,
             earlyAdopterPoints: 0,
             criticoPoints: 0,
@@ -65,15 +83,31 @@ export default function Leaderboards() {
           };
         }
 
-        userMap[userId].viciadorPoints += Number(p.hours_played) || 0;
+        // Mission multiplier: applied regardless of type (Bonus or Penalty/Reto)
+        const missionMult = (p as any).missions?.multiplier ?? 1;
+
+        userMap[userId].viciadorPoints += (Number(p.hours_played) || 0) * missionMult;
 
         const g = p.games as any;
         if (g) {
           const year = g.year || 0;
-          userMap[userId].earlyAdopterPoints += year;
-          userMap[userId].criticoPoints += Number((g.rating * 10).toFixed(0));
-          userMap[userId].exploradorPoints += (g.genres?.length || 0) * 10;
-          userMap[userId].retroPoints += year > 0 ? (new Date().getFullYear() - year) * 5 : 0;
+          userMap[userId].earlyAdopterPoints += year * missionMult;
+          userMap[userId].criticoPoints += Number((g.rating * 10).toFixed(0)) * missionMult;
+          userMap[userId].exploradorPoints += (g.genres?.length || 0) * 10 * missionMult;
+          userMap[userId].retroPoints += (year > 0 ? (new Date().getFullYear() - year) * 5 : 0) * missionMult;
+        }
+      });
+
+      // Apply global penalty factors per user (from penalties table)
+      Object.keys(userMap).forEach(userId => {
+        const email = userMap[userId].email;
+        const penFactor = penaltyByUser[email] ?? 1;
+        if (penFactor !== 1) {
+          userMap[userId].viciadorPoints     = Math.round(userMap[userId].viciadorPoints     * penFactor);
+          userMap[userId].earlyAdopterPoints = Math.round(userMap[userId].earlyAdopterPoints * penFactor);
+          userMap[userId].criticoPoints      = Math.round(userMap[userId].criticoPoints      * penFactor);
+          userMap[userId].exploradorPoints   = Math.round(userMap[userId].exploradorPoints   * penFactor);
+          userMap[userId].retroPoints        = Math.round(userMap[userId].retroPoints        * penFactor);
         }
       });
 
@@ -242,7 +276,12 @@ export default function Leaderboards() {
                         }`}>
                           #{rankInView}
                         </div>
-                        <span className="font-bold text-sm text-white truncate max-w-[150px]">{p.email}</span>
+                        <Link 
+                          href={`/perfil/${encodeURIComponent(p.email)}`}
+                          className="font-bold text-sm text-white truncate max-w-[150px] hover:text-indigo-300 underline-offset-2 hover:underline transition-colors"
+                        >
+                          {p.email}
+                        </Link>
                       </div>
                     </td>
                     

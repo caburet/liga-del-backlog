@@ -2,8 +2,17 @@
 
 import { useState, useEffect, useTransition } from 'react';
 import { Search, Loader2 } from 'lucide-react';
-import { searchGames, RawgGame } from '@/lib/rawg';
 import Image from 'next/image';
+
+interface RawgGame {
+  id: number;
+  name: string;
+  released: string;
+  background_image: string;
+  rating: number;
+  playtime: number;
+  genres: { name: string }[];
+}
 
 export default function SearchGames({ onSelect }: { onSelect: (game: RawgGame) => void }) {
   const [query, setQuery] = useState('');
@@ -15,15 +24,35 @@ export default function SearchGames({ onSelect }: { onSelect: (game: RawgGame) =
     const handler = setTimeout(() => {
       if (query.trim().length >= 2) {
         startTransition(async () => {
-          const res = await searchGames(query);
-          setResults(res);
-          setIsOpen(true);
+          const cacheKey = `rawg_search_${query.trim().toLowerCase()}`;
+          const cached = sessionStorage.getItem(cacheKey);
+          
+          if (cached) {
+            setResults(JSON.parse(cached));
+            setIsOpen(true);
+            return;
+          }
+
+          try {
+            const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+            const data = await response.json();
+            const res = data.results || [];
+            
+            setResults(res);
+            setIsOpen(true);
+            
+            if (res.length > 0) {
+              sessionStorage.setItem(cacheKey, JSON.stringify(res));
+            }
+          } catch (error) {
+            console.error("Search error:", error);
+          }
         });
       } else {
         setResults([]);
         setIsOpen(false);
       }
-    }, 250);
+    }, 400);
     return () => clearTimeout(handler);
   }, [query]);
 

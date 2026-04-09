@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { User, LogOut, Trophy, Gamepad2 } from 'lucide-react';
+import { User, LogOut, Trophy, Gamepad2, ShieldCheck } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import AuthDialog from '@/components/AuthDialog';
@@ -48,6 +48,16 @@ export default function Navbar() {
             }`}
           >
             <Trophy className="w-4 h-4" /> Liga Global
+          </Link>
+          <Link 
+            href="/auditor" 
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-full font-bold text-sm transition-colors border backdrop-blur-md shadow-lg ${
+              pathname === '/auditor' 
+              ? 'bg-emerald-600 border-emerald-500 text-white shadow-emerald-500/20' 
+              : 'bg-gray-800/80 border-gray-700 text-gray-300 hover:text-white hover:bg-gray-700'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4" /> Auditor
           </Link>
         </div>
 

@@ -5,9 +5,17 @@ import SearchGames from '@/components/SearchGames';
 import AuthDialog from '@/components/AuthDialog';
 import { RawgGame } from '@/lib/rawg';
 import Image from 'next/image';
-import { Zap, Star, Compass, Clock, Loader2, Check, AlertCircle, Timer, UploadCloud, ImageIcon } from 'lucide-react';
+import { Zap, Star, Compass, Clock, Loader2, Check, AlertCircle, Timer, UploadCloud, ImageIcon, Swords } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Session } from '@supabase/supabase-js';
+
+interface Mission {
+  id: string;
+  name: string;
+  description: string;
+  multiplier: number;
+  type: 'bonus' | 'penalty';
+}
 
 export default function Home() {
   const [selectedGame, setSelectedGame] = useState<RawgGame | null>(null);
@@ -16,16 +24,33 @@ export default function Home() {
   
   // Data State
   const [hoursPlayed, setHoursPlayed] = useState<number>(0);
+  const [verifiedHours, setVerifiedHours] = useState<number | null>(null);
   const [hltbProof, setHltbProof] = useState<File | null>(null);
   const [creditsProof, setCreditsProof] = useState<File | null>(null);
+  const [selectedMissionId, setSelectedMissionId] = useState<string>('');
   
   // Auth state
   const [session, setSession] = useState<Session | null>(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [missions, setMissions] = useState<Mission[]>([]);
+  const [availableUsers, setAvailableUsers] = useState<string[]>([]);
+  const [penaltyTargetEmail, setPenaltyTargetEmail] = useState<string>('');
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+    // Load all active missions for the selector
+    supabase.from('missions').select('*').eq('active', true)
+      .then(({ data }) => { if (data) setMissions(data as Mission[]); });
+    
+    // Load unique users for penalty selection
+    supabase.from('plays').select('user_email')
+      .then(({ data }) => {
+        if (data) {
+          const unique = [...new Set(data.map(p => p.user_email))].filter(Boolean) as string[];
+          setAvailableUsers(unique.sort());
+        }
+      });
     return () => subscription.unsubscribe();
   }, []);
 
@@ -74,16 +99,29 @@ export default function Home() {
       const hltbUrl = supabase.storage.from('proofs').getPublicUrl(hltbFileName).data.publicUrl;
       const creditsUrl = supabase.storage.from('proofs').getPublicUrl(creditsFileName).data.publicUrl;
 
-      // 3. Upsert a la tabla de plays
+      // 3. Upsert plays
+      const finalHours = verifiedHours !== null ? verifiedHours : hoursPlayed;
       const { error } = await supabase.from('plays').upsert({
         profile_id: session.user.id,
         user_email: session.user.email,
         game_id: selectedGame.id,
-        hours_played: hoursPlayed,
+        hours_played: finalHours,
         hltb_proof_url: hltbUrl,
         credits_proof_url: creditsUrl,
-        completed: true
+        completed: true,
+        hours_audited: verifiedHours !== null,
+        mission_id: selectedMissionId || null,
       }, { onConflict: 'profile_id, game_id' });
+
+      // 4. Si es una misión de penalidad, registrarla para el usuario objetivo
+      const mission = missions.find(m => m.id === selectedMissionId);
+      if (mission?.type === 'penalty' && penaltyTargetEmail) {
+        await supabase.from('penalties').insert({
+          user_email: penaltyTargetEmail,
+          game_id: selectedGame.id,
+          mission_id: selectedMissionId,
+        });
+      }
 
       if (error) {
         throw new Error(error.message);
@@ -113,13 +151,26 @@ export default function Home() {
 
         {/* ── Search ── */}
         <div className="w-full mb-12 relative z-40">
-          <SearchGames onSelect={(game) => {
+          <SearchGames onSelect={async (game) => {
              setSelectedGame(game);
              setSaveStatus('idle');
              setHltbProof(null);
              setCreditsProof(null);
-             // Opción Híbrida: Rellenamos con data general de RAWG, pero el user puede modificar a placer
+             setVerifiedHours(null);
              setHoursPlayed(game.playtime || 0);
+
+             // Check si ya hay horas auditadas para este juego
+             const { data } = await supabase
+               .from('plays')
+               .select('hours_played')
+               .match({ game_id: game.id, hours_audited: true })
+               .limit(1)
+               .maybeSingle();
+
+             if (data) {
+               setVerifiedHours(data.hours_played);
+               setHoursPlayed(data.hours_played);
+             }
           }} />
         </div>
 
@@ -150,12 +201,23 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Input Hours Card (Opción Híbrida) */}
-            <div className="bg-gray-800/80 rounded-2xl p-6 border border-gray-700 flex flex-col gap-5">
+            {/* Input Hours Card */}
+            <div className={`bg-gray-800/80 rounded-2xl p-6 border flex flex-col gap-5 ${verifiedHours !== null ? 'border-emerald-500/40 bg-emerald-900/5' : 'border-gray-700'}`}>
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-white font-bold text-lg flex items-center gap-2"><Timer className="w-5 h-5 text-purple-400"/> Horas Invertidas</h3>
-                  <p className="text-gray-400 text-sm">Corrobóralo con la web de HLTB</p>
+                  <h3 className="text-white font-bold text-lg flex items-center gap-2">
+                    <Timer className="w-5 h-5 text-purple-400"/> Horas Invertidas
+                    {verifiedHours !== null && (
+                      <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+                        <Check className="w-3 h-3" /> Verificadas
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-gray-400 text-sm">
+                    {verifiedHours !== null
+                      ? `Horas validadas por la Logia — no se pueden editar`
+                      : 'Corrobóralo con la web de HLTB'}
+                  </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <input 
@@ -163,20 +225,100 @@ export default function Home() {
                     min="0"
                     value={hoursPlayed}
                     onChange={(e) => setHoursPlayed(Number(e.target.value) || 0)}
-                    className="bg-gray-900 border border-gray-600 rounded-lg text-white font-black text-2xl w-24 text-center py-2 focus:border-indigo-500 transition-colors outline-none"
+                    disabled={verifiedHours !== null}
+                    className={`border rounded-lg text-white font-black text-2xl w-24 text-center py-2 focus:border-indigo-500 transition-colors outline-none ${
+                      verifiedHours !== null
+                        ? 'bg-emerald-900/20 border-emerald-500/40 text-emerald-300 cursor-not-allowed'
+                        : 'bg-gray-900 border-gray-600'
+                    }`}
                   />
                   <span className="text-gray-500 font-bold text-lg">hrs</span>
                 </div>
               </div>
-              <input 
-                type="range" 
-                min="0" 
-                max="500" 
-                value={hoursPlayed} 
-                onChange={(e) => setHoursPlayed(Number(e.target.value))}
-                className="w-full accent-purple-500 h-2 bg-gray-900 rounded-lg appearance-none cursor-pointer"
-              />
+              {verifiedHours === null && (
+                <input 
+                  type="range" 
+                  min="0" 
+                  max="500" 
+                  value={hoursPlayed} 
+                  onChange={(e) => setHoursPlayed(Number(e.target.value))}
+                  className="w-full accent-purple-500 h-2 bg-gray-900 rounded-lg appearance-none cursor-pointer"
+                />
+              )}
             </div>
+
+            {/* ── Mission Selector (Optional) ── */}
+            {missions.length > 0 && (
+              <div className="bg-orange-500/5 border border-orange-500/20 rounded-2xl p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <Swords className="w-5 h-5 text-orange-400" />
+                  <h3 className="text-white font-bold">¿Tenés una Misión activa? <span className="text-gray-500 font-normal text-sm">(opcional)</span></h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setSelectedMissionId('')}
+                    className={`flex items-center gap-3 p-3 rounded-xl border font-bold text-sm transition-colors text-left ${!selectedMissionId ? 'bg-gray-700 border-gray-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white'}`}
+                  >
+                    <span className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-800 text-gray-500 text-lg">—</span>
+                    Sin misión
+                  </button>
+                  {missions.map(m => (
+                    <button key={m.id}
+                      onClick={() => setSelectedMissionId(m.id)}
+                      className={`flex items-center gap-3 p-3 rounded-xl border font-bold text-sm transition-colors text-left ${
+                        selectedMissionId === m.id 
+                          ? (m.type === 'bonus' ? 'bg-orange-500/10 border-orange-500/40 text-orange-200' : 'bg-red-500/10 border-red-500/40 text-red-200')
+                          : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <span className={`w-8 h-8 flex items-center justify-center rounded-lg font-black text-xs shrink-0 ${
+                        m.type === 'bonus' ? 'bg-orange-500/10 text-orange-400' : 'bg-red-500/10 text-red-400'
+                      }`}>
+                        {m.type === 'bonus' ? `×${m.multiplier}` : `-${Math.round((1 - m.multiplier) * 100)}%`}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="truncate flex items-center gap-1.5">
+                          {m.name}
+                          <span className={`text-[9px] uppercase px-1 rounded border ${m.type === 'bonus' ? 'text-orange-400 border-orange-500/30' : 'text-red-400 border-red-500/30'}`}>
+                            {m.type === 'bonus' ? 'Bonus' : 'Reto'}
+                          </span>
+                        </div>
+                        {m.description && <div className="text-xs text-gray-500 font-normal truncate">{m.description}</div>}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                {selectedMissionId && (
+                  <div className="mt-4 animate-[fadeIn_0.2s_ease-out]">
+                    <p className={`text-xs font-bold flex items-center gap-1 mb-2 ${missions.find(m => m.id === selectedMissionId)?.type === 'bonus' ? 'text-orange-300' : 'text-red-300'}`}>
+                      <Swords className="w-3 h-3" /> 
+                      {missions.find(m => m.id === selectedMissionId)?.type === 'bonus' 
+                        ? `Misión activa: los puntos de este juego se multiplicarán ×${missions.find(m => m.id === selectedMissionId)?.multiplier}`
+                        : `Reto activado: esta penalidad se aplicará al usuario que selecciones.`}
+                    </p>
+
+                    {/* Selector de Usuario para Penalidad */}
+                    {missions.find(m => m.id === selectedMissionId)?.type === 'penalty' && (
+                      <div className="p-3 bg-red-900/20 border border-red-500/30 rounded-xl space-y-2">
+                         <label className="text-[10px] font-black uppercase text-red-300 block">¿Quién sufrirá la penalidad? *</label>
+                         <select 
+                           value={penaltyTargetEmail}
+                           onChange={(e) => setPenaltyTargetEmail(e.target.value)}
+                           className="w-full bg-gray-900 border border-red-500/50 rounded-lg px-3 py-2 text-white font-bold text-sm focus:outline-none focus:border-red-400"
+                           required
+                         >
+                           <option value="">— Seleccionar Jugador —</option>
+                           {availableUsers.map(email => (
+                             <option key={email} value={email}>{email}</option>
+                           ))}
+                         </select>
+                         <p className="text-[10px] text-red-400/80 italic">Nota: Al completar tu carga, este usuario recibirá un descuento en sus puntos globales de este juego.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Evidence File Uploads */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
