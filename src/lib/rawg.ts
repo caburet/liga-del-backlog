@@ -7,6 +7,7 @@ export interface RawgGame {
   released: string; // YYYY-MM-DD
   background_image: string;
   rating: number;
+  playtime: number;
   genres: { name: string }[];
 }
 
